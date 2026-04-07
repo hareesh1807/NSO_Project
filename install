@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [ "$#" -ne 3 ]; then
+  echo "Usage: install <openrc> <tag> <ssh_key>"
+  exit 1
+fi
+
+OPENRC="$1"
+TAG="$2"
+SSH_KEY="$3"
+
+echo "$(date '+%F %T') Starting deployment of $TAG using $OPENRC for credentials."
+echo "$(date '+%F %T') install scaffold ready"

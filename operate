@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [ "$#" -ne 3 ]; then
+  echo "Usage: operate <openrc> <tag> <ssh_key>"
+  exit 1
+fi
+
+OPENRC="$1"
+TAG="$2"
+SSH_KEY="$3"
+
+echo "$(date '+%F %T') Starting operations of $TAG using $OPENRC."
+echo "$(date '+%F %T') operate scaffold ready"

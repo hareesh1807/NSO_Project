@@ -1,0 +1,6 @@
+openstacksdk>=0.60.0
+python-openstackclient>=5.8.0
+ansible>=2.10.0
+flask>=2.0.0
+pyyaml>=5.4
+ping3>=3.0.0

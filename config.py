@@ -108,17 +108,6 @@ if __name__ == "__main__":
     print("Parsing servers.conf...")
     parser.parse_servers_conf()
     
-    print("\nOpenStack Config:")
-    for key, value in parser.get_openstack_env().items():
-        if 'PASSWORD' not in key:  # Don't print passwords
-            print(f"  {key}: {value}")
     
-    print("\nServer Counts:")
-    for key, value in parser.get_server_counts().items():
-        print(f"  {key}: {value}")
-    
-    print("\nValidating configuration...")
-    if parser.validate_config():
-        print("✓ Configuration is valid!")
     else:
         print("✗ Configuration is invalid!")

@@ -1,0 +1,273 @@
+  ---
+# Ansible Playbook
+# Configures all nodes: service, proxy, and bastion
+# Usage: ansible-playbook -i hosts site.yaml
+
+- name: Configure all nodes
+  hosts: all
+  become: yes
+  gather_facts: yes
+  
+  vars:
+    python_version: "3.8"
+    flask_port: 5000
+    service_user: "ubuntu"
+  
+  tasks:
+    # Update system
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+    
+    - name: Upgrade all packages
+      apt:
+        upgrade: dist
+    
+    # Install base packages
+    - name: Install base packages
+      apt:
+        name:
+          - curl
+          - wget
+          - git
+          - vim
+          - net-tools
+          - htop
+          - tmux
+          - openssh-client
+          - openssh-server
+        state: present
+    
+    # Install Python and pip
+    - name: Install Python and pip
+      apt:
+        name:
+          - "python{{ python_version }}"
+          - "python{{ python_version }}-pip"
+          - "python{{ python_version }}-venv"
+          - python3-dev
+          - build-essential
+        state: present
+    
+    # Install system monitoring tools
+    - name: Install monitoring tools
+      apt:
+        name:
+          - snmp
+          - snmpd
+          - psutil
+          - sysstat
+        state: present
+    
+    # Create application directory
+    - name: Create application directory
+      file:
+        path: /opt/nso-service
+        state: directory
+        owner: "{{ service_user }}"
+        group: "{{ service_user }}"
+        mode: '0755'
+    
+    # Copy service files
+    - name: Copy service.py to all nodes
+      copy:
+        src: ./service.py
+        dest: /opt/nso-service/service.py
+        owner: "{{ service_user }}"
+        group: "{{ service_user }}"
+        mode: '0755'
+    
+    # Install Python dependencies
+    - name: Install Flask and dependencies
+      pip:
+        name:
+          - flask>=2.0.0
+          - psutil>=5.8.0
+          - gunicorn>=20.1.0
+        state: present
+        executable: "pip{{ python_version }}"
+    
+    # Create systemd service for Flask
+    - name: Create Flask systemd service
+      template:
+        src: flask-service.j2
+        dest: /etc/systemd/system/flask-service.service
+        owner: root
+        group: root
+        mode: '0644'
+    
+    # Enable and start Flask service
+    - name: Enable Flask service
+      systemd:
+        name: flask-service
+        enabled: yes
+        daemon_reload: yes
+    
+    - name: Start Flask service
+      systemd:
+        name: flask-service
+        state: started
+    
+    # Configure SSH
+    - name: Configure SSH
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: "{{ item.regexp }}"
+        line: "{{ item.line }}"
+        state: present
+      loop:
+        - { regexp: '^PermitRootLogin', line: 'PermitRootLogin no' }
+        - { regexp: '^PasswordAuthentication', line: 'PasswordAuthentication no' }
+      notify: restart sshd
+    
+    # Configure firewall (ufw)
+    - name: Enable UFW firewall
+      ufw:
+        state: enabled
+        policy: deny
+        direction: incoming
+    
+    - name: Allow SSH through firewall
+      ufw:
+        rule: allow
+        port: '22'
+        proto: tcp
+    
+    - name: Allow HTTP through firewall
+      ufw:
+        rule: allow
+        port: '80'
+        proto: tcp
+    
+    - name: Allow HTTPS through firewall
+      ufw:
+        rule: allow
+        port: '443'
+        proto: tcp
+    
+    - name: Allow Flask port through firewall
+      ufw:
+        rule: allow
+        port: "{{ flask_port }}"
+        proto: tcp
+    
+    # Configure SNMP
+    - name: Copy snmpd.conf
+      copy:
+        src: ./snmpd.conf
+        dest: /etc/snmp/snmpd.conf
+        owner: root
+        group: root
+        mode: '0644'
+      notify: restart snmpd
+    
+    - name: Enable SNMP service
+      systemd:
+        name: snmpd
+        enabled: yes
+        state: started
+    
+    # Configure NTP for time sync
+    - name: Install NTP
+      apt:
+        name: ntp
+        state: present
+    
+    - name: Enable NTP service
+      systemd:
+        name: ntp
+        enabled: yes
+        state: started
+    
+    # Health check
+    - name: Verify Flask service is running
+      uri:
+        url: "http://localhost:{{ flask_port }}/health"
+        method: GET
+        status_code: 200
+      register: health_check
+      retries: 5
+      delay: 10
+      until: health_check.status == 200
+    
+    - name: Print node info
+      debug:
+        msg: "✓ Node {{ ansible_hostname }} configured successfully"
+
+  handlers:
+    - name: restart sshd
+      systemd:
+        name: sshd
+        state: restarted
+    
+    - name: restart snmpd
+      systemd:
+        name: snmpd
+        state: restarted
+
+# Configure proxy node specifically
+- name: Configure proxy node
+  hosts: HAproxy
+  become: yes
+  gather_facts: yes
+  
+  tasks:
+    - name: Install Nginx
+      apt:
+        name: nginx
+        state: present
+    
+    - name: Copy nginx.conf
+      copy:
+        src: ./nginx.conf
+        dest: /etc/nginx/sites-available/default
+        owner: root
+        group: root
+        mode: '0644'
+      notify: restart nginx
+    
+    - name: Enable Nginx service
+      systemd:
+        name: nginx
+        enabled: yes
+        state: started
+    
+    - name: Verify Nginx is running
+      uri:
+        url: "http://localhost/health"
+        method: GET
+        status_code: 200
+      retries: 5
+      delay: 5
+  
+  handlers:
+    - name: restart nginx
+      systemd:
+        name: nginx
+        state: restarted
+
+# Configure bastion node specifically
+- name: Configure bastion node
+  hosts: [HAproxy]
+  become: yes
+  gather_facts: yes
+  
+  tasks:
+    - name: Install monitoring tools on bastion
+      apt:
+        name:
+          - nagios3
+          - nagios-plugins
+          - nrpe-server
+        state: present
+    
+    - name: Create bastion scripts directory
+      file:
+        path: /opt/bastion
+        state: directory
+        mode: '0755'
+    
+    - name: Print bastion info
+      debug:
+        msg: "✓ Bastion node {{ ansible_hostname }} configured successfully"

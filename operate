@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash
 set -euo pipefail
 
 if [ "$#" -ne 3 ]; then
@@ -10,5 +10,61 @@ OPENRC="$1"
 TAG="$2"
 SSH_KEY="$3"
 
-echo "$(date '+%F %T') Starting operations of $TAG using $OPENRC."
-echo "$(date '+%F %T') operate scaffold ready"
+echo "$(date '+%Y-%m-%d %H:%M:%S') Starting operations of $TAG using $OPENRC."
+
+# Source the OpenRC file
+source "$OPENRC"
+
+# Main operation loop
+while true; do
+  # Read desired node count from servers.conf
+  DESIRED=$(grep "service_nodes" servers.conf | cut -d'=' -f2)
+  
+  echo "$(date '+%Y-%m-%d %H:%M:%S') Reading server.conf, we need $DESIRED nodes."
+  
+  
+  CURRENT=$(openstack server list --name "${TAG}_service" -f value -c Name | wc -l)
+  
+  echo "$(date '+%Y-%m-%d %H:%M:%S') Checking solution, we have: $CURRENT nodes."
+  
+  if [ "$CURRENT" -eq "$DESIRED" ]; then
+    echo "$(date '+%Y-%m-%d %H:%M:%S') Sleeping."
+    sleep 30
+  elif [ "$CURRENT" -lt "$DESIRED" ]; then
+    # Need to add nodes
+    NEEDED=$((DESIRED - CURRENT))
+    echo "$(date '+%Y-%m-%d %H:%M:%S') Need to launch $NEEDED more nodes"
+    
+   
+    MAX_NUM=$(openstack server list --name "${TAG}_service" -f value -c Name | sed "s/${TAG}_service//" | sort -n | tail -1)
+    if [ -z "$MAX_NUM" ]; then
+      MAX_NUM=0
+    fi
+    
+   
+    for ((i=1; i<=NEEDED; i++)); do
+      NEW_NUM=$((MAX_NUM + i))
+      echo "$(date '+%Y-%m-%d %H:%M:%S') Launching ${TAG}_service${NEW_NUM}"
+      openstack server create --image Ubuntu-22.04 --flavor small --network ${TAG}_network --security-group ${TAG}_sg --key-name ${TAG}_key ${TAG}_service${NEW_NUM} &
+    done
+    wait
+    
+    echo "$(date '+%Y-%m-%d %H:%M:%S') Nodes launched, sleeping 60 seconds before validation"
+    sleep 60
+  elif [ "$CURRENT" -gt "$DESIRED" ]; then
+    # Need to remove nodes
+    EXCESS=$((CURRENT - DESIRED))
+    echo "$(date '+%Y-%m-%d %H:%M:%S') Too many nodes, removing $EXCESS"
+    
+    
+    NODES=$(openstack server list --name "${TAG}_service" -f value -c ID | tail -n $EXCESS)
+    for NODE_ID in $NODES; do
+      echo "$(date '+%Y-%m-%d %H:%M:%S') Deleting node $NODE_ID"
+      openstack server delete $NODE_ID &
+    done
+    wait
+    
+    echo "$(date '+%Y-%m-%d %H:%M:%S') Nodes removed, sleeping 60 seconds"
+    sleep 60
+  fi
+done

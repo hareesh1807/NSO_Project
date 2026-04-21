@@ -119,6 +119,6 @@ if __name__ == "__main__":
     
     print("\nValidating configuration...")
     if parser.validate_config():
-        print("✓ Configuration is valid!")
+        print(" Configuration is valid!")
     else:
-        print("✗ Configuration is invalid!")
+        print(" Configuration is invalid!")

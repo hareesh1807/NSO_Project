@@ -10,7 +10,7 @@
 # OpenStack API is version 3. For example, your cloud provider may implement
 # Image API v1.1, Block Storage API v2, and Compute API v2.0. OS_AUTH_URL is
 # only for the Identity API served through keystone.
-export OS_AUTH_URL=https://horizon.cl.bth.se:5000
+export OS_AUTH_URL=https://horizon.nplab.bth.se:5000
 # With the addition of Keystone we have standardized on the term **project**
 # as the entity that owns the resources.
 export OS_PROJECT_ID=f778fba8f6b946cdb2b184098db43486

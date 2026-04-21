@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash
 set -euo pipefail
 
 if [ "$#" -ne 3 ]; then
@@ -10,5 +10,46 @@ OPENRC="$1"
 TAG="$2"
 SSH_KEY="$3"
 
-echo "$(date '+%F %T') Starting cleanup of $TAG using $OPENRC."
-echo "$(date '+%F %T') cleanup scaffold ready"
+echo "$(date '+%Y-%m-%d %H:%M:%S') Cleaning up $TAG using $OPENRC"
+
+source "$OPENRC"
+
+# Delete all instances with this tag
+echo "$(date '+%Y-%m-%d %H:%M:%S') Deleting instances..."
+openstack server delete --wait ${TAG}_bastion 2>/dev/null || echo "Bastion not found"
+openstack server delete --wait ${TAG}_proxy 2>/dev/null || echo "Proxy not found"
+
+# Delete all service nodes
+SERVICES=$(openstack server list --name "${TAG}_service" -f value -c ID)
+for SERVICE_ID in $SERVICES; do
+  openstack server delete $SERVICE_ID 2>/dev/null || echo "Service node already deleted"
+done
+
+echo "$(date '+%Y-%m-%d %H:%M:%S') Waiting for all nodes to be deleted..."
+sleep 10
+
+# Delete router
+echo "$(date '+%Y-%m-%d %H:%M:%S') Removing ${TAG}_router"
+SUBNET_ID=$(openstack subnet show ${TAG}_subnet -f value -c id 2>/dev/null || echo "")
+if [ -n "$SUBNET_ID" ]; then
+  openstack router remove subnet ${TAG}_router ${TAG}_subnet 2>/dev/null || echo "Subnet not in router"
+fi
+openstack router delete ${TAG}_router 2>/dev/null || echo "Router not found"
+
+# Delete subnet
+echo "$(date '+%Y-%m-%d %H:%M:%S') Removing ${TAG}_subnet"
+openstack subnet delete ${TAG}_subnet 2>/dev/null || echo "Subnet not found"
+
+# Delete network
+echo "$(date '+%Y-%m-%d %H:%M:%S') Removing ${TAG}_network"
+openstack network delete ${TAG}_network 2>/dev/null || echo "Network not found"
+
+# Delete security group
+echo "$(date '+%Y-%m-%d %H:%M:%S') Removing ${TAG}_sg"
+openstack security group delete ${TAG}_sg 2>/dev/null || echo "Security group not found"
+
+# Delete keypair
+echo "$(date '+%Y-%m-%d %H:%M:%S') Removing ${TAG}_key"
+openstack keypair delete ${TAG}_key 2>/dev/null || echo "Keypair not found"
+
+echo "$(date '+%Y-%m-%d %H:%M:%S') Cleanup done."

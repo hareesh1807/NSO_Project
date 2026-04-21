@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash
 set -euo pipefail
 
 if [ "$#" -ne 3 ]; then
@@ -10,5 +10,82 @@ OPENRC="$1"
 TAG="$2"
 SSH_KEY="$3"
 
-echo "$(date '+%F %T') Starting deployment of $TAG using $OPENRC for credentials."
-echo "$(date '+%F %T') install scaffold ready"
+echo "$(date '+%Y-%m-%d %H:%M:%S') Starting deployment of $TAG using $OPENRC for credentials."
+
+# Source the OpenRC file to get credentials
+source "$OPENRC"
+
+echo "$(date '+%Y-%m-%d %H:%M:%S') Connected to OpenStack project: $OS_PROJECT_NAME"
+echo "$(date '+%Y-%m-%d %H:%M:%S') Checking floating IPs..."
+
+# Create network
+echo "$(date '+%Y-%m-%d %H:%M:%S') Creating network ${TAG}_network..."
+openstack network create ${TAG}_network || echo "Network may already exist"
+
+# Create subnet
+echo "$(date '+%Y-%m-%d %H:%M:%S') Creating subnet ${TAG}_subnet..."
+openstack subnet create --network ${TAG}_network --subnet-range 10.0.0.0/24 ${TAG}_subnet || echo "Subnet may already exist"
+
+# Create router
+echo "$(date '+%Y-%m-%d %H:%M:%S') Creating router ${TAG}_router..."
+ROUTER_ID=$(openstack router create ${TAG}_router -f value -c id 2>/dev/null || echo "")
+if [ -n "$ROUTER_ID" ]; then
+  SUBNET_ID=$(openstack subnet show ${TAG}_subnet -f value -c id)
+  openstack router add subnet ${TAG}_router ${TAG}_subnet || echo "Subnet may already be added"
+  openstack router set --external-gateway public ${TAG}_router || echo "Gateway may already be set"
+fi
+
+# Create security group
+echo "$(date '+%Y-%m-%d %H:%M:%S') Creating security group ${TAG}_sg..."
+openstack security group create ${TAG}_sg --description "Security group for $TAG" || echo "Security group may already exist"
+
+# Add security group rules
+openstack security group rule create --ingress --protocol tcp --dst-port 22 ${TAG}_sg || echo "SSH rule may already exist"
+openstack security group rule create --ingress --protocol tcp --dst-port 80 ${TAG}_sg || echo "HTTP rule may already exist"
+openstack security group rule create --ingress --protocol tcp --dst-port 443 ${TAG}_sg || echo "HTTPS rule may already exist"
+openstack security group rule create --ingress --protocol tcp --dst-port 5000 ${TAG}_sg || echo "Flask rule may already exist"
+openstack security group rule create --ingress --protocol tcp --dst-port 6000 ${TAG}_sg || echo "SNMP rule may already exist"
+openstack security group rule create --ingress --protocol udp --dst-port 161 ${TAG}_sg || echo "SNMP UDP rule may already exist"
+openstack security group rule create --ingress --protocol icmp ${TAG}_sg || echo "ICMP rule may already exist"
+
+# Create keypair
+echo "$(date '+%Y-%m-%d %H:%M:%S') Creating keypair ${TAG}_key..."
+if [ -f "$SSH_KEY.pub" ]; then
+  openstack keypair create --public-key ${SSH_KEY}.pub ${TAG}_key || echo "Keypair may already exist"
+else
+  echo "Error: SSH public key ${SSH_KEY}.pub not found"
+  exit 1
+fi
+
+
+echo "$(date '+%Y-%m-%d %H:%M:%S') Finding Ubuntu 22.04 image..."
+IMAGE_ID=$(openstack image list --name "Ubuntu 22.04" -f value -c ID | head -1)
+if [ -z "$IMAGE_ID" ]; then
+  echo "Error: Ubuntu 22.04 image not found"
+  exit 1
+fi
+
+
+NETWORK_ID=$(openstack network show ${TAG}_network -f value -c id)
+
+# Launch instances
+echo "$(date '+%Y-%m-%d %H:%M:%S') Launching instances..."
+echo "$(date '+%Y-%m-%d %H:%M:%S') Launching bastion node..."
+openstack server create --image $IMAGE_ID --flavor small --network $NETWORK_ID --security-group ${TAG}_sg --key-name ${TAG}_key ${TAG}_bastion &
+
+echo "$(date '+%Y-%m-%d %H:%M:%S') Launching proxy node..."
+openstack server create --image $IMAGE_ID --flavor small --network $NETWORK_ID --security-group ${TAG}_sg --key-name ${TAG}_key ${TAG}_proxy &
+
+echo "$(date '+%Y-%m-%d %H:%M:%S') Launching 3 service nodes..."
+openstack server create --image $IMAGE_ID --flavor small --network $NETWORK_ID --security-group ${TAG}_sg --key-name ${TAG}_key ${TAG}_service1 &
+openstack server create --image $IMAGE_ID --flavor small --network $NETWORK_ID --security-group ${TAG}_sg --key-name ${TAG}_key ${TAG}_service2 &
+openstack server create --image $IMAGE_ID --flavor small --network $NETWORK_ID --security-group ${TAG}_sg --key-name ${TAG}_key ${TAG}_service3 &
+
+wait
+
+echo "$(date '+%Y-%m-%d %H:%M:%S') Waiting for nodes to boot..."
+sleep 30
+
+echo "$(date '+%Y-%m-%d %H:%M:%S') All nodes are done."
+echo "$(date '+%Y-%m-%d %H:%M:%S') Deployment scaffold complete."
+echo "$(date '+%Y-%m-%d %H:%M:%S') OK"

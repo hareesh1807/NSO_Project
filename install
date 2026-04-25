@@ -1,91 +1,200 @@
 #!/bin/bash
-set -euo pipefail
 
 if [ "$#" -ne 3 ]; then
-  echo "Usage: install <openrc> <tag> <ssh_key>"
+  echo "Usage: ./install <openrc> <tag> <ssh_key>"
   exit 1
 fi
 
 OPENRC="$1"
 TAG="$2"
 SSH_KEY="$3"
+KEY_NAME_PUB="${SSH_KEY%.pub}"
 
-echo "$(date '+%Y-%m-%d %H:%M:%S') Starting deployment of $TAG using $OPENRC for credentials."
+# --- WSL PERMISSION & FORMAT FIX ---
+SAFE_KEY="/tmp/${KEY_NAME_PUB}_safe"
+cp "$KEY_NAME_PUB" "$SAFE_KEY" >/dev/null 2>&1 || true
+sed -i 's/\r$//' "$SAFE_KEY" >/dev/null 2>&1 || true
+chmod 600 "$SAFE_KEY" >/dev/null 2>&1 || true
+# -----------------------------------
 
-# Source the OpenRC file to get credentials
-source "$OPENRC"
+FLAVOR_BASTION="small"
+FLAVOR_NODE="tiny"
+IMAGE_NAME="Ubuntu 20.04"
+SERVER_CONF="servers.conf"
 
-echo "$(date '+%Y-%m-%d %H:%M:%S') Connected to OpenStack project: $OS_PROJECT_NAME"
-echo "$(date '+%Y-%m-%d %H:%M:%S') Checking floating IPs..."
+source "$OPENRC" 
 
-# Create network
-echo "$(date '+%Y-%m-%d %H:%M:%S') Creating network ${TAG}_network..."
-openstack network create ${TAG}_network || echo "Network may already exist"
+echo "====================================================="
+echo "[START] Deploying Topology: $TAG"
+echo "====================================================="
 
-# Create subnet
-echo "$(date '+%Y-%m-%d %H:%M:%S') Creating subnet ${TAG}_subnet..."
-openstack subnet create --network ${TAG}_network --subnet-range 10.0.0.0/24 ${TAG}_subnet || echo "Subnet may already exist"
-
-# Create router
-echo "$(date '+%Y-%m-%d %H:%M:%S') Creating router ${TAG}_router..."
-ROUTER_ID=$(openstack router create ${TAG}_router -f value -c id 2>/dev/null || echo "")
-if [ -n "$ROUTER_ID" ]; then
-  SUBNET_ID=$(openstack subnet show ${TAG}_subnet -f value -c id)
-  openstack router add subnet ${TAG}_router ${TAG}_subnet || echo "Subnet may already be added"
-  openstack router set --external-gateway public ${TAG}_router || echo "Gateway may already be set"
-fi
-
-# Create security group
-echo "$(date '+%Y-%m-%d %H:%M:%S') Creating security group ${TAG}_sg..."
-openstack security group create ${TAG}_sg --description "Security group for $TAG" || echo "Security group may already exist"
-
-# Add security group rules
-openstack security group rule create --ingress --protocol tcp --dst-port 22 ${TAG}_sg || echo "SSH rule may already exist"
-openstack security group rule create --ingress --protocol tcp --dst-port 80 ${TAG}_sg || echo "HTTP rule may already exist"
-openstack security group rule create --ingress --protocol tcp --dst-port 443 ${TAG}_sg || echo "HTTPS rule may already exist"
-openstack security group rule create --ingress --protocol tcp --dst-port 5000 ${TAG}_sg || echo "Flask rule may already exist"
-openstack security group rule create --ingress --protocol tcp --dst-port 6000 ${TAG}_sg || echo "SNMP rule may already exist"
-openstack security group rule create --ingress --protocol udp --dst-port 161 ${TAG}_sg || echo "SNMP UDP rule may already exist"
-openstack security group rule create --ingress --protocol icmp ${TAG}_sg || echo "ICMP rule may already exist"
-
-# Create keypair
-echo "$(date '+%Y-%m-%d %H:%M:%S') Creating keypair ${TAG}_key..."
-if [ -f "$SSH_KEY.pub" ]; then
-  openstack keypair create --public-key ${SSH_KEY}.pub ${TAG}_key || echo "Keypair may already exist"
+# 1. Parse Configuration
+if [ ! -f "$SERVER_CONF" ]; then
+    NUM_NODES=3
 else
-  echo "Error: SSH public key ${SSH_KEY}.pub not found"
-  exit 1
+    NUM_NODES=$(grep -i "^service_nodes" "$SERVER_CONF" | awk -F "=" '{print $2}' | tr -d '\r' | tr -d ' ')
 fi
+if [ -z "$NUM_NODES" ]; then NUM_NODES=3; fi
+echo "[INFO] Configuration parsed: Deploying $NUM_NODES backend service nodes."
 
-
-echo "$(date '+%Y-%m-%d %H:%M:%S') Finding Ubuntu 22.04 image..."
-IMAGE_ID=$(openstack image list --name "Ubuntu 22.04" -f value -c ID | head -1)
+# 2. Pre-Flight Check
+IMAGE_ID=$(openstack image list -f value | grep -i "$IMAGE_NAME" | awk '{print $1}' | head -n 1)
 if [ -z "$IMAGE_ID" ]; then
-  echo "Error: Ubuntu 22.04 image not found"
-  exit 1
+    echo "[ERROR] Could not find image containing '$IMAGE_NAME'."
+    exit 1
 fi
 
+# 3. Network & Security (WITH DNS)
+echo "[INFO] Provisioning Network, Subnets, and Routers..."
+openstack network create "${TAG}_network" >/dev/null 2>&1 || true
+openstack subnet create --network "${TAG}_network" --subnet-range 10.0.0.0/24 --dns-nameserver 8.8.8.8 --dns-nameserver 1.1.1.1 "${TAG}_subnet" >/dev/null 2>&1 || true
 
-NETWORK_ID=$(openstack network show ${TAG}_network -f value -c id)
+EXT_NET=$(openstack network list --external -f value -c ID | head -n 1)
+openstack router create "${TAG}_router" >/dev/null 2>&1 || true
+openstack router add subnet "${TAG}_router" "${TAG}_subnet" >/dev/null 2>&1 || true
+openstack router set --external-gateway "$EXT_NET" "${TAG}_router" >/dev/null 2>&1 || true
 
-# Launch instances
-echo "$(date '+%Y-%m-%d %H:%M:%S') Launching instances..."
-echo "$(date '+%Y-%m-%d %H:%M:%S') Launching bastion node..."
-openstack server create --image $IMAGE_ID --flavor small --network $NETWORK_ID --security-group ${TAG}_sg --key-name ${TAG}_key ${TAG}_bastion &
+echo "[INFO] Compiling Security Group rules (SSH, HTTP, ICMP)..."
+openstack security group create "${TAG}_sg" >/dev/null 2>&1 || true
+openstack security group rule create --protocol tcp --dst-port 22:22 --remote-ip 0.0.0.0/0 "${TAG}_sg" >/dev/null 2>&1 || true
+openstack security group rule create --protocol tcp --dst-port 80:80 --remote-ip 0.0.0.0/0 "${TAG}_sg" >/dev/null 2>&1 || true
+openstack security group rule create --protocol tcp --dst-port 443:443 --remote-ip 0.0.0.0/0 "${TAG}_sg" >/dev/null 2>&1 || true
+openstack security group rule create --protocol tcp --dst-port 5000:5000 --remote-ip 0.0.0.0/0 "${TAG}_sg" >/dev/null 2>&1 || true
+openstack security group rule create --protocol icmp --remote-ip 0.0.0.0/0 "${TAG}_sg" >/dev/null 2>&1 || true
 
-echo "$(date '+%Y-%m-%d %H:%M:%S') Launching proxy node..."
-openstack server create --image $IMAGE_ID --flavor small --network $NETWORK_ID --security-group ${TAG}_sg --key-name ${TAG}_key ${TAG}_proxy &
+openstack keypair create --public-key "$SSH_KEY" "${TAG}_key" >/dev/null 2>&1 || true
 
-echo "$(date '+%Y-%m-%d %H:%M:%S') Launching 3 service nodes..."
-openstack server create --image $IMAGE_ID --flavor small --network $NETWORK_ID --security-group ${TAG}_sg --key-name ${TAG}_key ${TAG}_service1 &
-openstack server create --image $IMAGE_ID --flavor small --network $NETWORK_ID --security-group ${TAG}_sg --key-name ${TAG}_key ${TAG}_service2 &
-openstack server create --image $IMAGE_ID --flavor small --network $NETWORK_ID --security-group ${TAG}_sg --key-name ${TAG}_key ${TAG}_service3 &
+NET_ID=$(openstack network show "${TAG}_network" -f value -c id)
 
-wait
+# 4. Launching Compute
+echo "[INFO] Dispatching Compute Instances..."
+openstack server create --flavor "$FLAVOR_BASTION" --image "$IMAGE_ID" --network "$NET_ID" --security-group "${TAG}_sg" --key-name "${TAG}_key" "${TAG}_bastion" >/dev/null 2>&1
+sleep 5
+openstack server create --flavor "$FLAVOR_NODE" --image "$IMAGE_ID" --network "$NET_ID" --security-group "${TAG}_sg" --key-name "${TAG}_key" "${TAG}_proxy" >/dev/null 2>&1
+sleep 5
 
-echo "$(date '+%Y-%m-%d %H:%M:%S') Waiting for nodes to boot..."
-sleep 30
+for ((i = 1; i <= NUM_NODES; i++)); do
+    openstack server create --flavor "$FLAVOR_NODE" --image "$IMAGE_ID" --network "$NET_ID" --security-group "${TAG}_sg" --key-name "${TAG}_key" "${TAG}_Node$i" >/dev/null 2>&1
+    sleep 5
+done
 
-echo "$(date '+%Y-%m-%d %H:%M:%S') All nodes are done."
-echo "$(date '+%Y-%m-%d %H:%M:%S') Deployment scaffold complete."
-echo "$(date '+%Y-%m-%d %H:%M:%S') OK"
+# --- SELF-HEALING WAIT LOOP ---
+echo "[WAIT] Awaiting ACTIVE status from Nova hypervisor..."
+for NODE in "${TAG}_bastion" "${TAG}_proxy"; do
+    while [ "$(openstack server show "$NODE" -f value -c status 2>/dev/null)" != "ACTIVE" ]; do sleep 5; done
+    echo "  -> $NODE is online."
+done
+
+for ((i = 1; i <= NUM_NODES; i++)); do
+    MAX_WAIT=10
+    WAIT_COUNT=0
+    while [ $WAIT_COUNT -lt $MAX_WAIT ]; do
+        STATUS=$(openstack server show "${TAG}_Node$i" -f value -c status 2>/dev/null || echo "MISSING")
+        if [ "$STATUS" == "ACTIVE" ]; then
+            echo "  -> ${TAG}_Node$i is online."
+            break
+        elif [ "$STATUS" == "ERROR" ]; then
+            echo "  -> [WARNING] ${TAG}_Node$i crashed in OpenStack. Skipping."
+            break
+        elif [ "$STATUS" == "MISSING" ] && [ $WAIT_COUNT -eq 8 ]; then
+            echo "  -> [WARNING] OpenStack silently dropped ${TAG}_Node$i. Skipping."
+            break
+        fi
+        sleep 5
+        ((WAIT_COUNT++))
+    done
+done
+# ------------------------------
+
+# 5. Floating IPs
+echo "[INFO] Attaching External Floating IPs..."
+FIP1=$(openstack floating ip create "$EXT_NET" -f value -c floating_ip_address 2>/dev/null)
+FIP2=$(openstack floating ip create "$EXT_NET" -f value -c floating_ip_address 2>/dev/null)
+
+openstack server add floating ip "${TAG}_bastion" "$FIP1" >/dev/null 2>&1 || true
+openstack server add floating ip "${TAG}_proxy" "$FIP2" >/dev/null 2>&1 || true
+echo "[SUCCESS] Routing established. Bastion: $FIP1 | Proxy: $FIP2"
+
+# 6. VISIBLE SSH WAIT LOOP
+echo "[WAIT] Verifying SSH daemon on Bastion node..."
+MAX_RETRIES=18
+RETRY_COUNT=0
+while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
+    if ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no -q -i "$SAFE_KEY" ubuntu@"$FIP1" 'exit' >/dev/null 2>&1; then
+        echo "[SUCCESS] SSH handshake established."
+        break
+    else
+        sleep 10
+        ((RETRY_COUNT++))
+    fi
+done
+
+if [ $RETRY_COUNT -eq $MAX_RETRIES ]; then
+    echo "[ERROR] SSH connection timed out. Run this to debug: ssh -v -i $SAFE_KEY ubuntu@$FIP1"
+    exit 1
+fi
+
+# 7. Generate Configs
+echo "[INFO] Generating Ansible inventory and SSH config maps..."
+PROXY_IP=$(openstack server show -f value -c addresses "${TAG}_proxy" 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | head -n 1)
+
+echo "[haproxy]" > hosts
+echo "${TAG}_proxy ansible_host=$PROXY_IP" >> hosts
+echo "" >> hosts
+echo "[webservers]" >> hosts
+
+> config
+for ((i=1; i<= NUM_NODES; i++)); do
+    STATUS=$(openstack server show "${TAG}_Node$i" -f value -c status 2>/dev/null || echo "MISSING")
+    if [ "$STATUS" == "ACTIVE" ]; then
+        NODE_IP=$(openstack server show -f value -c addresses "${TAG}_Node$i" 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | head -n 1)
+        echo "${TAG}_Node$i ansible_host=$NODE_IP" >> hosts
+        
+        echo "Host ${TAG}_Node$i" >> config
+        echo "  HostName $NODE_IP" >> config
+        echo "  User ubuntu" >> config
+        echo "  StrictHostKeyChecking no" >> config
+        echo "  IdentityFile ~/.ssh/$KEY_NAME_PUB" >> config
+        echo "" >> config
+    fi
+done
+
+echo "" >> hosts
+echo "[all:vars]" >> hosts
+echo "ansible_user=ubuntu" >> hosts
+echo "ansible_ssh_private_key_file=~/.ssh/$KEY_NAME_PUB" >> hosts
+
+echo "Host ${TAG}_proxy" >> config
+echo "  HostName $PROXY_IP" >> config
+echo "  User ubuntu" >> config
+echo "  StrictHostKeyChecking no" >> config
+echo "  IdentityFile ~/.ssh/$KEY_NAME_PUB" >> config
+
+# 8. Run Ansible
+echo "[WAIT] Waiting for Ubuntu background setup to finish (cloud-init)..."
+ssh -o StrictHostKeyChecking=no -i "$SAFE_KEY" ubuntu@"$FIP1" 'cloud-init status --wait'
+
+echo "[INFO] Bootstrapping Ansible on Bastion..."
+ssh -o StrictHostKeyChecking=no -i "$SAFE_KEY" ubuntu@"$FIP1" '
+    echo "Checking for system locks..."
+    while sudo fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || sudo fuser /var/lib/dpkg/lock >/dev/null 2>&1; do 
+        sleep 10
+    done
+    echo "Locks cleared. Installing Ansible..."
+    sudo apt-get update -y
+    sudo DEBIAN_FRONTEND=noninteractive apt-get install -y ansible
+'
+
+echo "[INFO] Pushing configuration matrices to Bastion..."
+FILES=("hosts" "config" "site.yaml" "servers.conf" "my_flask_app.service" "application2.py" "haproxy.cfg.j2" "nginx.conf" "snmpd.conf")
+for FILE in "${FILES[@]}"; do
+    if [ -f "$FILE" ]; then scp -o StrictHostKeyChecking=no -i "$SAFE_KEY" "$FILE" ubuntu@"$FIP1":~/.ssh/ >/dev/null 2>&1; fi
+done
+scp -o StrictHostKeyChecking=no -i "$SAFE_KEY" "$SAFE_KEY" ubuntu@"$FIP1":~/.ssh/"$KEY_NAME_PUB" >/dev/null 2>&1
+
+echo "[INFO] Triggering Ansible Playbook (You will see the output below)..."
+ssh -o StrictHostKeyChecking=no -i "$SAFE_KEY" ubuntu@"$FIP1" "cd ~/.ssh && chmod 600 $KEY_NAME_PUB && ANSIBLE_HOST_KEY_CHECKING=False ansible-playbook -i hosts site.yaml"
+
+echo "====================================================="
+echo "[SUCCESS] Deployment Sequence Complete."
+echo "====================================================="

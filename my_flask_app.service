@@ -1,0 +1,12 @@
+[Unit]
+Description=Flask Backend Application
+After=network.target
+
+[Service]
+User=ubuntu
+WorkingDirectory=/opt/nso-service
+ExecStart=/usr/bin/python3 /opt/nso-service/application2.py
+Restart=always
+
+[Install]
+WantedBy=multi-user.target

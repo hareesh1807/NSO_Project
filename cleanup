@@ -1,55 +1,40 @@
 #!/bin/bash
-set -euo pipefail
 
-if [ "$#" -ne 3 ]; then
-  echo "Usage: cleanup <openrc> <tag> <ssh_key>"
+if [ "$#" -lt 2 ]; then
+  echo "Usage: ./cleanup <openrc> <tag>"
   exit 1
 fi
 
 OPENRC="$1"
 TAG="$2"
-SSH_KEY="$3"
 
-echo "$(date '+%Y-%m-%d %H:%M:%S') Cleaning up $TAG using $OPENRC"
-
+echo "[INFO] Sourcing credentials from $OPENRC..."
 source "$OPENRC"
 
-# Delete all instances with this tag
-echo "$(date '+%Y-%m-%d %H:%M:%S') Deleting instances..."
-openstack server delete --wait ${TAG}_bastion 2>/dev/null || echo "Bastion not found"
-openstack server delete --wait ${TAG}_proxy 2>/dev/null || echo "Proxy not found"
+echo "[INFO] Commencing teardown for environment: $TAG"
 
-# Delete all service nodes
-SERVICES=$(openstack server list --name "${TAG}_service" -f value -c ID)
-for SERVICE_ID in $SERVICES; do
-  openstack server delete $SERVICE_ID 2>/dev/null || echo "Service node already deleted"
-done
-
-echo "$(date '+%Y-%m-%d %H:%M:%S') Waiting for all nodes to be deleted..."
-sleep 10
-
-# Delete router
-echo "$(date '+%Y-%m-%d %H:%M:%S') Removing ${TAG}_router"
-SUBNET_ID=$(openstack subnet show ${TAG}_subnet -f value -c id 2>/dev/null || echo "")
-if [ -n "$SUBNET_ID" ]; then
-  openstack router remove subnet ${TAG}_router ${TAG}_subnet 2>/dev/null || echo "Subnet not in router"
+# 1. Delete Instances (Catches EVERYTHING starting with the tag)
+NODES=$(openstack server list --name "^${TAG}_" -f value -c ID)
+if [ -n "$NODES" ]; then
+    echo "[INFO] Terminating compute instances..."
+    echo "$NODES" | xargs -r openstack server delete || true
+    echo "[WAIT] Allowing Nova backend 15 seconds to release quotas..."
+    sleep 15
+else
+    echo "[INFO] No running instances found for tag $TAG."
 fi
-openstack router delete ${TAG}_router 2>/dev/null || echo "Router not found"
 
-# Delete subnet
-echo "$(date '+%Y-%m-%d %H:%M:%S') Removing ${TAG}_subnet"
-openstack subnet delete ${TAG}_subnet 2>/dev/null || echo "Subnet not found"
+# 2. Delete Unused Floating IPs
+echo "[INFO] Releasing orphaned Floating IPs..."
+openstack floating ip list --status DOWN -f value -c ID | xargs -r openstack floating ip delete >/dev/null 2>&1 || true
 
-# Delete network
-echo "$(date '+%Y-%m-%d %H:%M:%S') Removing ${TAG}_network"
-openstack network delete ${TAG}_network 2>/dev/null || echo "Network not found"
+# 3. Destroy Network Stack
+echo "[INFO] Destroying networking components and security groups..."
+openstack security group delete "${TAG}_sg" >/dev/null 2>&1 || true
+openstack router remove subnet "${TAG}_router" "${TAG}_subnet" >/dev/null 2>&1 || true
+openstack router delete "${TAG}_router" >/dev/null 2>&1 || true
+openstack subnet delete "${TAG}_subnet" >/dev/null 2>&1 || true
+openstack network delete "${TAG}_network" >/dev/null 2>&1 || true
+openstack keypair delete "${TAG}_key" >/dev/null 2>&1 || true
 
-# Delete security group
-echo "$(date '+%Y-%m-%d %H:%M:%S') Removing ${TAG}_sg"
-openstack security group delete ${TAG}_sg 2>/dev/null || echo "Security group not found"
-
-# Delete keypair
-echo "$(date '+%Y-%m-%d %H:%M:%S') Removing ${TAG}_key"
-openstack keypair delete ${TAG}_key 2>/dev/null || echo "Keypair not found"
-
-echo "$(date '+%Y-%m-%d %H:%M:%S') Cleanup done."
+echo "[SUCCESS] Environment $TAG has been completely sanitized."

@@ -1,70 +1,144 @@
 #!/bin/bash
-set -euo pipefail
 
 if [ "$#" -ne 3 ]; then
-  echo "Usage: operate <openrc> <tag> <ssh_key>"
+  echo "Usage: ./operate <openrc> <tag> <ssh_key>"
   exit 1
 fi
 
 OPENRC="$1"
 TAG="$2"
 SSH_KEY="$3"
+KEY_NAME_PUB="${SSH_KEY%.pub}"
 
-echo "$(date '+%Y-%m-%d %H:%M:%S') Starting operations of $TAG using $OPENRC."
+# --- WSL PERMISSION & FORMAT FIX ---
+SAFE_KEY="/tmp/${KEY_NAME_PUB}_safe"
+cp "$KEY_NAME_PUB" "$SAFE_KEY" >/dev/null 2>&1 || true
+sed -i 's/\r$//' "$SAFE_KEY" >/dev/null 2>&1 || true
+chmod 600 "$SAFE_KEY" >/dev/null 2>&1 || true
+# -----------------------------------
 
-# Source the OpenRC file
-source "$OPENRC"
+FLAVOR_NODE="tiny"
+IMAGE_NAME="Ubuntu 20.04"
+SERVER_CONF="servers.conf"
 
-# Main operation loop
+source "$OPENRC" 
+
+echo "====================================================="
+echo "[START] Operation Daemon Started for: $TAG"
+echo "====================================================="
+
+IMAGE_ID=$(openstack image list -f value | grep -i "$IMAGE_NAME" | awk '{print $1}' | head -n 1)
+NET_ID=$(openstack network show "${TAG}_network" -f value -c id)
+
+# Grab Bastion's External IP for Ansible
+FIP_BASTION=$(openstack server show "${TAG}_bastion" -f value -c addresses 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | grep -v '^10\.' | head -n 1)
+
 while true; do
-  # Read desired node count from servers.conf
-  DESIRED=$(grep "service_nodes" servers.conf | cut -d'=' -f2)
-  
-  echo "$(date '+%Y-%m-%d %H:%M:%S') Reading server.conf, we need $DESIRED nodes."
-  
-  
-  CURRENT=$(openstack server list --name "${TAG}_service" -f value -c Name | wc -l)
-  
-  echo "$(date '+%Y-%m-%d %H:%M:%S') Checking solution, we have: $CURRENT nodes."
-  
-  if [ "$CURRENT" -eq "$DESIRED" ]; then
-    echo "$(date '+%Y-%m-%d %H:%M:%S') Sleeping."
-    sleep 30
-  elif [ "$CURRENT" -lt "$DESIRED" ]; then
-    # Need to add nodes
-    NEEDED=$((DESIRED - CURRENT))
-    echo "$(date '+%Y-%m-%d %H:%M:%S') Need to launch $NEEDED more nodes"
-    
-   
-    MAX_NUM=$(openstack server list --name "${TAG}_service" -f value -c Name | sed "s/${TAG}_service//" | sort -n | tail -1)
-    if [ -z "$MAX_NUM" ]; then
-      MAX_NUM=0
+    # Reset trigger at the start of every loop to prevent infinite Ansible runs
+    TRIGGER_ANSIBLE=false
+
+    # 1. Read desired node count (stripping Windows characters)
+    if [ ! -f "$SERVER_CONF" ]; then
+        DESIRED=3
+    else
+        DESIRED=$(grep -i "^service_nodes" "$SERVER_CONF" | awk -F "=" '{print $2}' | tr -d '\r' | tr -d ' ')
     fi
-    
-   
-    for ((i=1; i<=NEEDED; i++)); do
-      NEW_NUM=$((MAX_NUM + i))
-      echo "$(date '+%Y-%m-%d %H:%M:%S') Launching ${TAG}_service${NEW_NUM}"
-      openstack server create --image Ubuntu-22.04 --flavor small --network ${TAG}_network --security-group ${TAG}_sg --key-name ${TAG}_key ${TAG}_service${NEW_NUM} &
-    done
-    wait
-    
-    echo "$(date '+%Y-%m-%d %H:%M:%S') Nodes launched, sleeping 60 seconds before validation"
-    sleep 60
-  elif [ "$CURRENT" -gt "$DESIRED" ]; then
-    # Need to remove nodes
-    EXCESS=$((CURRENT - DESIRED))
-    echo "$(date '+%Y-%m-%d %H:%M:%S') Too many nodes, removing $EXCESS"
-    
-    
-    NODES=$(openstack server list --name "${TAG}_service" -f value -c ID | tail -n $EXCESS)
-    for NODE_ID in $NODES; do
-      echo "$(date '+%Y-%m-%d %H:%M:%S') Deleting node $NODE_ID"
-      openstack server delete $NODE_ID &
-    done
-    wait
-    
-    echo "$(date '+%Y-%m-%d %H:%M:%S') Nodes removed, sleeping 60 seconds"
-    sleep 60
-  fi
+
+    # 2. Find currently running nodes
+    CURRENT_NODES=$(openstack server list --name "^${TAG}_Node" -f value -c Name)
+    CURRENT=$(echo "$CURRENT_NODES" | grep -v '^$' | wc -l)
+
+    echo "[INFO] $(date '+%H:%M:%S') | Target: $DESIRED nodes | Active: $CURRENT nodes."
+
+    # --- NO CHANGES NEEDED ---
+    if [ "$CURRENT" -eq "$DESIRED" ]; then
+        sleep 10
+
+    # --- SCALE UP ---
+    elif [ "$CURRENT" -lt "$DESIRED" ]; then
+        NEEDED=$((DESIRED - CURRENT))
+        echo "[ACTION] Scaling UP. Launching $NEEDED new node(s)..."
+        
+        # Find the highest existing node number
+        EXISTING_NUMS=$(echo "$CURRENT_NODES" | grep -oE '[0-9]+$' | sort -n)
+        MAX_NUM=$(echo "$EXISTING_NUMS" | tail -n 1)
+        if [ -z "$MAX_NUM" ]; then MAX_NUM=0; fi
+
+        for ((i=1; i<=NEEDED; i++)); do
+            NEW_NUM=$((MAX_NUM + i))
+            echo "  -> Provisioning ${TAG}_Node${NEW_NUM}..."
+            openstack server create --flavor "$FLAVOR_NODE" --image "$IMAGE_ID" --network "$NET_ID" --security-group "${TAG}_sg" --key-name "${TAG}_key" "${TAG}_Node${NEW_NUM}" >/dev/null 2>&1
+        done
+        
+        echo "[WAIT] Awaiting ACTIVE status from Nova hypervisor..."
+        for ((i=1; i<=NEEDED; i++)); do
+            NEW_NUM=$((MAX_NUM + i))
+            while [ "$(openstack server show "${TAG}_Node${NEW_NUM}" -f value -c status 2>/dev/null)" != "ACTIVE" ]; do sleep 5; done
+            echo "  -> ${TAG}_Node${NEW_NUM} is online."
+        done
+        TRIGGER_ANSIBLE=true
+
+    # --- SCALE DOWN ---
+    elif [ "$CURRENT" -gt "$DESIRED" ]; then
+        EXCESS=$((CURRENT - DESIRED))
+        echo "[ACTION] Scaling DOWN. Terminating $EXCESS node(s)..."
+        
+        # Delete the highest numbered nodes first
+        NODES_TO_DELETE=$(echo "$CURRENT_NODES" | sort -r | head -n $EXCESS)
+        for NODE in $NODES_TO_DELETE; do
+            echo "  -> Terminating $NODE..."
+            openstack server delete "$NODE" >/dev/null 2>&1
+        done
+        
+        echo "[WAIT] Allowing Nova backend to release quotas..."
+        sleep 15
+        TRIGGER_ANSIBLE=true
+    fi
+
+    # --- RECONFIGURE ANSIBLE ---
+    if [ "$TRIGGER_ANSIBLE" = true ]; then
+        echo "[INFO] Topology changed. Rebuilding Ansible configurations..."
+        
+        PROXY_IP=$(openstack server show -f value -c addresses "${TAG}_proxy" 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | head -n 1)
+        
+        echo "[haproxy]" > hosts
+        echo "${TAG}_proxy ansible_host=$PROXY_IP" >> hosts
+        echo "" >> hosts
+        echo "[webservers]" >> hosts
+
+        > config
+        # Fetch updated node list
+        UPDATED_NODES=$(openstack server list --name "^${TAG}_Node" -f value -c Name | sort)
+        for NODE in $UPDATED_NODES; do
+            NODE_IP=$(openstack server show -f value -c addresses "$NODE" 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | head -n 1)
+            echo "$NODE ansible_host=$NODE_IP" >> hosts
+            
+            echo "Host $NODE" >> config
+            echo "  HostName $NODE_IP" >> config
+            echo "  User ubuntu" >> config
+            echo "  StrictHostKeyChecking no" >> config
+            echo "  IdentityFile ~/.ssh/$KEY_NAME_PUB" >> config
+            echo "" >> config
+        done
+
+        echo "" >> hosts
+        echo "[all:vars]" >> hosts
+        echo "ansible_user=ubuntu" >> hosts
+        echo "ansible_ssh_private_key_file=~/.ssh/$KEY_NAME_PUB" >> hosts
+
+        echo "Host ${TAG}_proxy" >> config
+        echo "  HostName $PROXY_IP" >> config
+        echo "  User ubuntu" >> config
+        echo "  StrictHostKeyChecking no" >> config
+        echo "  IdentityFile ~/.ssh/$KEY_NAME_PUB" >> config
+
+        echo "[INFO] Pushing updated matrices to Bastion..."
+        scp -o StrictHostKeyChecking=no -i "$SAFE_KEY" hosts config ubuntu@"$FIP_BASTION":~/.ssh/ >/dev/null 2>&1
+
+        echo "[INFO] Triggering Ansible Playbook to update HAProxy..."
+        ssh -o StrictHostKeyChecking=no -i "$SAFE_KEY" ubuntu@"$FIP_BASTION" "cd ~/.ssh && chmod 600 $KEY_NAME_PUB && ANSIBLE_HOST_KEY_CHECKING=False ansible-playbook -i hosts site.yaml" >/dev/null 2>&1
+
+        echo "[SUCCESS] Reconfiguration complete. Monitoring..."
+        TRIGGER_ANSIBLE=false
+    fi
 done

@@ -1,18 +1,11 @@
-#Simple flask services/applications for various assignments.
-# 
-# main.py: Online calculator, supports only 'add'.
-# application2.py: Replies with a string containing the Time and hostname.
-# assignment2.py: Replies with an HTML formatted string containing the Time and hostname.
+Project Overview
+This Network Systems and Operations (NSO) project provides a fully automated, zero-touch deployment of a scalable cloud infrastructure using OpenStack and Ansible. The architecture consists of a secure Bastion host, an HAProxy load balancer, and a dynamic backend of Flask worker nodes. The lifecycle of this environment is managed entirely through three core scripts: install, operate, and cleanup.
 
-#export FLASK_APP=<filename>
-#export FLASK_RUN_HOST=<localhost|0.0.0.0>
-#export FLASK_RUN_PORT=8210
+1. The Install Script 
+The install script acts as the primary deployment engine. It seamlessly bridges OpenStack infrastructure provisioning with Ansible configuration management without requiring human intervention. It authenticates with the OpenStack API, dynamically creates the required cloud networks, subnets, routers, security groups, and SSH key pairs, and boots the Bastion, Proxy, and Worker nodes. Once the infrastructure is online, it generates a dynamic Ansible inventory based on the newly allocated IP addresses and triggers the master playbook from the Bastion node to securely configure HAProxy, install Flask, and synchronize monitoring.
 
+2. The Operate Script 
+The operate script is a continuous monitoring and reconciliation daemon. It ensures the live cloud environment strictly matches the desired state defined in the local configuration file. It continuously loops and reads the target node count. If the target increases, it automatically provisions new instances via OpenStack APIs, waits for them to boot, and safely re-triggers Ansible to add them to the HAProxy rotation. If the target decreases, it safely terminates the excess instances and updates the load balancer to stop routing traffic to them.
 
-
-Usage Example:
-export FLASK_APP=main.py
-export FLASK_RUN_HOST=localhost
-export FLASK_RUN_PORT=8210
-flask run
-
+3. The Cleanup Script 
+The cleanup script guarantees a clean slate. It is designed to safely and completely dismantle the environment deployed by the install script, ensuring no orphaned resources or unexpected cloud billing charges remain. It locates all compute instances, networks, and security groups associated with the project tag, safely terminates the instances, releases the floating IPs, disconnects routers, and destroys the isolated project networks, leaving the OpenStack environment exactly as it was found.

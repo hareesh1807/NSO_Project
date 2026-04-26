@@ -1,4 +1,4 @@
-Project Overview
+Project Overview:
 This Network Systems and Operations (NSO) project provides a fully automated, zero-touch deployment of a scalable cloud infrastructure using OpenStack and Ansible. The architecture consists of a secure Bastion host, an HAProxy load balancer, and a dynamic backend of Flask worker nodes. The lifecycle of this environment is managed entirely through three core scripts: install, operate, and cleanup.
 
 1. The Install Script 

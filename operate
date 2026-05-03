@@ -24,7 +24,7 @@ SERVER_CONF="servers.conf"
 source "$OPENRC" 
 
 echo "====================================================="
-echo "[START] Operation Daemon Started for: $TAG"
+echo "[START] Operation Started for: $TAG"
 echo "====================================================="
 
 IMAGE_ID=$(openstack image list -f value | grep -i "$IMAGE_NAME" | awk '{print $1}' | head -n 1)

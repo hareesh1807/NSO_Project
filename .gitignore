@@ -32,3 +32,4 @@ Thumbs.db
 *.conf.bak
 nodes_*.txt
 deployment_*.log
+*.sh
